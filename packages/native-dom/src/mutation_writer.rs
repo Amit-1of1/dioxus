@@ -1,12 +1,10 @@
 //! Integration between Dioxus and Blitz
 use crate::{qual_name, trace, NodeId};
 use blitz_dom::{BaseDocument, DocumentMutator};
-use blitz_traits::events::DomEventKind;
 use dioxus_core::{
     AttributeValue, ElementId, Template, TemplateAttribute, TemplateNode, WriteMutations,
 };
 use rustc_hash::FxHashMap;
-use std::str::FromStr as _;
 
 /// The state of the Dioxus integration with the RealDom
 #[derive(Debug)]
@@ -17,8 +15,13 @@ pub struct DioxusState {
     pub(crate) stack: Vec<NodeId>,
     /// Mapping from vdom ElementId -> rdom NodeId
     pub(crate) node_id_mapping: Vec<Option<NodeId>>,
-    /// Count of each handler type
-    pub(crate) event_handler_counts: [u32; 32],
+    /// PATCH(rust-ui): count of listeners per event name (upstream counted only the event
+    /// kinds Blitz itself produces, so pointer, hover, focus and mounted listeners were invisible)
+    pub(crate) listener_counts: FxHashMap<&'static str, u32>,
+    /// PATCH(rust-ui): elements whose `onmounted` has not fired yet
+    pub(crate) mounted_queue: Vec<ElementId>,
+    /// PATCH(rust-ui): the hovered element and its ancestors, innermost first
+    pub(crate) hover_chain: Vec<NodeId>,
 }
 
 impl DioxusState {
@@ -28,7 +31,9 @@ impl DioxusState {
             templates: FxHashMap::default(),
             stack: vec![root_id],
             node_id_mapping: vec![Some(root_id)],
-            event_handler_counts: [0; 32],
+            listener_counts: FxHashMap::default(),
+            mounted_queue: Vec::new(),
+            hover_chain: Vec::new(),
         }
     }
 
@@ -40,6 +45,10 @@ impl DioxusState {
     /// Attempt to convert an ElementId to a NodeId. This will return None if the ElementId is not in the RealDom.
     pub fn try_element_to_node_id(&self, element_id: ElementId) -> Option<NodeId> {
         self.node_id_mapping.get(element_id.0).copied().flatten()
+    }
+
+    pub(crate) fn has_listeners(&self, name: &str) -> bool {
+        self.listener_counts.get(name).is_some_and(|&n| n > 0)
     }
 
     pub(crate) fn anchor_and_nodes(&mut self, id: ElementId, m: usize) -> (usize, Vec<usize>) {
@@ -251,16 +260,17 @@ impl WriteMutations for MutationWriter<'_> {
 
         // node.add_event_listener(name);
 
-        if let Ok(kind) = DomEventKind::from_str(name) {
-            let idx = kind.discriminant() as usize;
-            self.state.event_handler_counts[idx] += 1;
+        let name = name.strip_prefix("on").unwrap_or(name);
+        *self.state.listener_counts.entry(name).or_default() += 1;
+        if name == "mounted" {
+            self.state.mounted_queue.push(id);
         }
     }
 
     fn remove_event_listener(&mut self, name: &'static str, _id: ElementId) {
-        if let Ok(kind) = DomEventKind::from_str(name) {
-            let idx = kind.discriminant() as usize;
-            self.state.event_handler_counts[idx] -= 1;
+        let name = name.strip_prefix("on").unwrap_or(name);
+        if let Some(n) = self.state.listener_counts.get_mut(name) {
+            *n = n.saturating_sub(1);
         }
     }
 }
@@ -330,7 +340,10 @@ fn set_attribute_inner(
     match value {
         None => docm.clear_attribute(node_id, name),
         Some(value) => {
-            if local_name == "checked" && is_falsy {
+            // PATCH(rust-ui): a false boolean attribute is removed, as on the web. Upstream only
+            // did this for `checked`, so `disabled: false` disabled an element and
+            // `hidden: false` hid it.
+            if (value != "true" || is_falsy) && BOOLEAN_ATTRIBUTES.contains(&local_name) {
                 docm.clear_attribute(node_id, name);
             } else if local_name == "dangerous_inner_html" {
                 docm.set_inner_html(node_id, value);
@@ -340,3 +353,34 @@ fn set_attribute_inner(
         }
     }
 }
+
+/// HTML boolean attributes; like dioxus' web interpreter, any value but "true" removes them.
+const BOOLEAN_ATTRIBUTES: &[&str] = &[
+    "allowfullscreen",
+    "allowpaymentrequest",
+    "async",
+    "autofocus",
+    "autoplay",
+    "checked",
+    "controls",
+    "default",
+    "defer",
+    "disabled",
+    "formnovalidate",
+    "hidden",
+    "ismap",
+    "itemscope",
+    "loop",
+    "multiple",
+    "muted",
+    "nomodule",
+    "novalidate",
+    "open",
+    "playsinline",
+    "readonly",
+    "required",
+    "reversed",
+    "selected",
+    "truespeed",
+    "webkitdirectory",
+];

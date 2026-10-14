@@ -7,12 +7,14 @@ use dioxus_html::{
     },
     AnimationData, CancelData, ClipboardData, CompositionData, DragData, FocusData, FormData,
     FormValue, HasFileData, HasFocusData, HasFormData, HasKeyboardData, HasMouseData,
-    HtmlEventConverter, ImageData, KeyboardData, MediaData, MountedData, MouseData,
+    HasPointerData, HtmlEventConverter, ImageData, KeyboardData, MediaData, MountedData, MouseData,
     PlatformEventData, PointerData, ResizeData, ScrollData, SelectionData, ToggleData, TouchData,
     TransitionData, VisibleData, WheelData,
 };
 use keyboard_types::{Code, Key, Location, Modifiers};
 use std::any::Any;
+
+pub(crate) use crate::mounted::NativeMountedData;
 
 pub struct NativeConverter {}
 
@@ -26,6 +28,9 @@ impl HtmlEventConverter for NativeConverter {
     }
 
     fn convert_mouse_data(&self, event: &PlatformEventData) -> MouseData {
+        if let Some(pointer) = event.downcast::<NativePointerData>() {
+            return pointer.0.clone().into();
+        }
         event.downcast::<NativeClickData>().unwrap().clone().into()
     }
 
@@ -65,12 +70,16 @@ impl HtmlEventConverter for NativeConverter {
         unimplemented!("todo: convert_media_data in dioxus-native. requires support in blitz")
     }
 
-    fn convert_mounted_data(&self, _event: &PlatformEventData) -> MountedData {
-        unimplemented!("todo: convert_mounted_data in dioxus-native. requires support in blitz")
+    // PATCH(rust-ui): onmounted and pointer events (upstream: `unimplemented!`).
+    fn convert_mounted_data(&self, event: &PlatformEventData) -> MountedData {
+        MountedData::new(event.downcast::<NativeMountedData>().unwrap().clone())
     }
 
-    fn convert_pointer_data(&self, _event: &PlatformEventData) -> PointerData {
-        unimplemented!("todo: convert_pointer_data in dioxus-native. requires support in blitz")
+    fn convert_pointer_data(&self, event: &PlatformEventData) -> PointerData {
+        if let Some(pointer) = event.downcast::<NativePointerData>() {
+            return pointer.clone().into();
+        }
+        NativePointerData(event.downcast::<NativeClickData>().unwrap().clone()).into()
     }
 
     fn convert_scroll_data(&self, _event: &PlatformEventData) -> ScrollData {
@@ -171,39 +180,49 @@ impl HasKeyboardData for BlitzKeyboardData {
     }
 }
 
+/// PATCH(rust-ui): mouse data with real client, page and element coordinates (upstream
+/// reported page coordinates as client ones and panicked on the others).
 #[derive(Clone)]
-pub struct NativeClickData(pub(crate) BlitzMouseButtonEvent);
+pub struct NativeClickData {
+    pub(crate) event: BlitzMouseButtonEvent,
+    /// Relative to the window (page minus viewport scroll).
+    pub(crate) client: (f64, f64),
+    /// Relative to the document.
+    pub(crate) page: (f64, f64),
+    /// Relative to the target element's border box.
+    pub(crate) element: (f64, f64),
+}
 
 impl InteractionLocation for NativeClickData {
     fn client_coordinates(&self) -> ClientPoint {
-        ClientPoint::new(self.0.x as _, self.0.y as _)
+        ClientPoint::new(self.client.0, self.client.1)
     }
 
-    // these require blitz to pass them along, or a dom rect
+    // The window position is not known, so screen coordinates are client coordinates.
     fn screen_coordinates(&self) -> ScreenPoint {
-        unimplemented!()
+        ScreenPoint::new(self.client.0, self.client.1)
     }
 
     fn page_coordinates(&self) -> PagePoint {
-        unimplemented!()
+        PagePoint::new(self.page.0, self.page.1)
     }
 }
 
 impl InteractionElementOffset for NativeClickData {
     fn element_coordinates(&self) -> ElementPoint {
-        unimplemented!()
+        ElementPoint::new(self.element.0, self.element.1)
     }
 }
 
 impl ModifiersInteraction for NativeClickData {
     fn modifiers(&self) -> Modifiers {
-        self.0.mods
+        self.event.mods
     }
 }
 
 impl PointerInteraction for NativeClickData {
     fn trigger_button(&self) -> Option<MouseButton> {
-        Some(match self.0.button {
+        Some(match self.event.button {
             MouseEventButton::Main => MouseButton::Primary,
             MouseEventButton::Auxiliary => MouseButton::Auxiliary,
             MouseEventButton::Secondary => MouseButton::Secondary,
@@ -213,7 +232,7 @@ impl PointerInteraction for NativeClickData {
     }
 
     fn held_buttons(&self) -> MouseButtonSet {
-        dioxus_html::input_data::decode_mouse_button_set(self.0.buttons.bits() as u16)
+        dioxus_html::input_data::decode_mouse_button_set(self.event.buttons.bits() as u16)
     }
 }
 impl HasMouseData for NativeClickData {
@@ -225,6 +244,89 @@ impl HasMouseData for NativeClickData {
 #[derive(Clone)]
 pub struct NativeFocusData {}
 impl HasFocusData for NativeFocusData {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self as &dyn std::any::Any
+    }
+}
+
+/// PATCH(rust-ui): pointer events, synthesised from Blitz's mouse events (one mouse pointer).
+#[derive(Clone)]
+pub struct NativePointerData(pub(crate) NativeClickData);
+
+impl InteractionLocation for NativePointerData {
+    fn client_coordinates(&self) -> ClientPoint {
+        self.0.client_coordinates()
+    }
+    fn screen_coordinates(&self) -> ScreenPoint {
+        self.0.screen_coordinates()
+    }
+    fn page_coordinates(&self) -> PagePoint {
+        self.0.page_coordinates()
+    }
+}
+
+impl InteractionElementOffset for NativePointerData {
+    fn element_coordinates(&self) -> ElementPoint {
+        self.0.element_coordinates()
+    }
+}
+
+impl ModifiersInteraction for NativePointerData {
+    fn modifiers(&self) -> Modifiers {
+        self.0.modifiers()
+    }
+}
+
+impl PointerInteraction for NativePointerData {
+    fn trigger_button(&self) -> Option<MouseButton> {
+        self.0.trigger_button()
+    }
+    fn held_buttons(&self) -> MouseButtonSet {
+        self.0.held_buttons()
+    }
+}
+
+impl HasPointerData for NativePointerData {
+    fn pointer_id(&self) -> i32 {
+        1
+    }
+    fn width(&self) -> f64 {
+        1.0
+    }
+    fn height(&self) -> f64 {
+        1.0
+    }
+    fn pressure(&self) -> f32 {
+        if self.0.event.buttons.is_empty() {
+            0.0
+        } else {
+            0.5
+        }
+    }
+    fn tangential_pressure(&self) -> f32 {
+        0.0
+    }
+    fn tilt_x(&self) -> i32 {
+        0
+    }
+    fn tilt_y(&self) -> i32 {
+        0
+    }
+    fn twist(&self) -> i32 {
+        0
+    }
+    fn pointer_type(&self) -> String {
+        "mouse".into()
+    }
+    fn is_primary(&self) -> bool {
+        true
+    }
+    fn as_any(&self) -> &dyn std::any::Any {
+        self as &dyn std::any::Any
+    }
+}
+
+impl HasMouseData for NativePointerData {
     fn as_any(&self) -> &dyn std::any::Any {
         self as &dyn std::any::Any
     }
