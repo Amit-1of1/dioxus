@@ -902,6 +902,37 @@ impl<'a> Splitter<'a> {
     }
 
     fn unused_main_symbols(&self) -> HashSet<Node> {
+        let mut unused = self.unused_main_symbols_by_graph();
+        // PATCH(rust-ui): a function that stays in main (for example a wasm-bindgen closure
+        // shim reached only through the table, so in neither graph) may call one that only a
+        // split point reaches. Deleting the callee left a dangling call and `gc::run` panicked
+        // ("assertion failed: !self.dead.contains(&id)"), so keep every callee of a kept
+        // function, until nothing changes. Split exports are removed with their exports.
+        loop {
+            let mut keep = HashSet::new();
+            for func in self.source_module.funcs.iter() {
+                if unused.contains(&Node::Function(func.id()))
+                    || self.split_points.iter().any(|s| s.export_func == func.id())
+                {
+                    continue;
+                }
+                for child in self.call_graph.get(&Node::Function(func.id())).into_iter().flatten() {
+                    if matches!(child, Node::Function(_)) && unused.contains(child) {
+                        keep.insert(*child);
+                    }
+                }
+            }
+            if keep.is_empty() {
+                break;
+            }
+            for k in keep {
+                unused.remove(&k);
+            }
+        }
+        unused
+    }
+
+    fn unused_main_symbols_by_graph(&self) -> HashSet<Node> {
         self.split_points
             .iter()
             .flat_map(|split| split.reachable_graph.iter())
@@ -1247,6 +1278,13 @@ impl<'a> ModuleWithRelocations<'a> {
                 assert!(reloc_range.start >= range.start);
                 assert!(reloc_range.end <= range.end);
 
+                // PATCH(rust-ui): a type index relocation (from `call_indirect`) holds a type
+                // index, not a symbol index. Read as a symbol it adds an edge to whichever symbol
+                // has that index. Split exports have low symbol indices, so main appeared to call
+                // them and their whole lazy component stayed in the main module.
+                if entry.ty == wasmparser::RelocationType::TypeIndexLeb {
+                    continue;
+                }
                 if let Some(target) = self.get_symbol_dep_node(entry.index as usize)? {
                     let us = Node::Function(func_id);
                     self.call_graph.entry(us).or_default().insert(target);
