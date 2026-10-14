@@ -61,7 +61,7 @@ pub(crate) enum MountedRequest {
     ScrollOffset(usize, Reply<MountedResult<PixelsVector2D>>),
     ScrollSize(usize, Reply<MountedResult<PixelsSize>>),
     ScrollIntoView(usize, ScrollToOptions, Reply<MountedResult<()>>),
-    ScrollBy(usize, PixelsVector2D, Reply<MountedResult<()>>),
+    ScrollTo(usize, PixelsVector2D, Reply<MountedResult<()>>),
     Focus(usize, bool, Reply<MountedResult<()>>),
 }
 
@@ -115,7 +115,7 @@ impl RenderedElementBacking for NativeMountedData {
         coordinates: PixelsVector2D,
         _behavior: ScrollBehavior,
     ) -> Pin<Box<dyn Future<Output = MountedResult<()>>>> {
-        self.ask(|id, reply| MountedRequest::ScrollBy(id, coordinates, reply))
+        self.ask(|id, reply| MountedRequest::ScrollTo(id, coordinates, reply))
     }
 
     fn set_focus(&self, focus: bool) -> Pin<Box<dyn Future<Output = MountedResult<()>>>> {
@@ -165,8 +165,15 @@ pub(crate) fn service(doc: &mut blitz_dom::BaseDocument, requests: Vec<MountedRe
             } else {
                 gone()
             }),
-            MountedRequest::ScrollBy(id, by, reply) => reply.send(if exists(doc, id) {
-                doc.scroll_node_by(id, -by.x, -by.y);
+            // Like the web's `Element.scroll()`: an absolute position, clamped, on this element
+            // only (no bubbling to ancestors).
+            MountedRequest::ScrollTo(id, to, reply) => reply.send(if exists(doc, id) {
+                let node = doc.get_node(id).unwrap();
+                let max_x = node.final_layout.scroll_width() as f64;
+                let max_y = node.final_layout.scroll_height() as f64;
+                let x = to.x.clamp(0.0, max_x.max(0.0));
+                let y = to.y.clamp(0.0, max_y.max(0.0));
+                doc.get_node_mut(id).unwrap().scroll_offset = blitz_dom::Point { x, y };
                 Ok(())
             } else {
                 gone()

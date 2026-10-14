@@ -159,21 +159,27 @@ impl DioxusDocument {
 
     /// PATCH(rust-ui): fire `onmounted` for elements created since the last call.
     /// PATCH(rust-ui): fire `load` on images whose data arrived since the last poll.
+    /// `load` for images that arrived and `error` for images that failed, since the last poll.
     fn fire_image_loads(&mut self) -> bool {
         let loaded = self.inner.take_loaded_images();
-        if loaded.is_empty() || !self.vdom_state.has_listeners("load") {
-            return false;
-        }
-        for node_id in loaded {
-            let Some(id) = self.inner.get_node(node_id).and_then(get_dioxus_id) else {
+        let failed = self.inner.take_failed_images();
+        let mut fired = false;
+        for (name, nodes, error) in [("load", loaded, false), ("error", failed, true)] {
+            if nodes.is_empty() || !self.vdom_state.has_listeners(name) {
                 continue;
-            };
-            let data = wrap_event_data(NativeImageData { error: false });
-            self.vdom
-                .runtime()
-                .handle_event("load", Event::new(data, false), id);
+            }
+            for node_id in nodes {
+                let Some(id) = self.inner.get_node(node_id).and_then(get_dioxus_id) else {
+                    continue;
+                };
+                let data = wrap_event_data(NativeImageData { error });
+                self.vdom
+                    .runtime()
+                    .handle_event(name, Event::new(data, false), id);
+            }
+            fired = true;
         }
-        true
+        fired
     }
 
     fn fire_mounted(&mut self) {
@@ -419,6 +425,65 @@ impl DioxusEventHandler<'_> {
     }
 }
 
+fn empty_form_data() -> Rc<dyn Any> {
+    wrap_event_data(NativeFormData {
+        value: String::new(),
+        values: vec![],
+    })
+}
+
+/// Index in `chain` (target first) of the form whose submit button was clicked.
+fn clicked_submit_form(doc: &BaseDocument, chain: &[usize]) -> Option<usize> {
+    let is = |id: usize, tag: &str| {
+        doc.get_node(id).is_some_and(|n| {
+            n.data
+                .is_element_with_tag_name(&blitz_dom::LocalName::from(tag))
+        })
+    };
+    let attr = |id: usize, name: &str| {
+        doc.get_node(id)
+            .and_then(|n| n.attr(blitz_dom::LocalName::from(name)).map(str::to_owned))
+    };
+    let button = chain.iter().position(|&id| {
+        (is(id, "button") && matches!(attr(id, "type").as_deref(), None | Some("submit")))
+            || (is(id, "input") && attr(id, "type").as_deref() == Some("submit"))
+    })?;
+    if attr(chain[button], "disabled").is_some() {
+        return None;
+    }
+    // `<input type=submit>` is already submitted by Blitz; only tell scripts about buttons.
+    if is(chain[button], "input") {
+        return None;
+    }
+    chain[button..]
+        .iter()
+        .position(|&id| is(id, "form"))
+        .map(|i| button + i)
+}
+
+/// Index in `chain` of the form that Enter in the focused single-line field submits.
+fn implicit_submit_form(doc: &BaseDocument, chain: &[usize]) -> Option<usize> {
+    let target = doc.get_node(*chain.first()?)?;
+    if !target
+        .data
+        .is_element_with_tag_name(&blitz_dom::local_name!("input"))
+    {
+        return None;
+    }
+    if matches!(
+        target.attr(blitz_dom::local_name!("type")),
+        Some("checkbox" | "radio" | "button" | "submit" | "reset" | "image" | "file")
+    ) {
+        return None;
+    }
+    chain.iter().position(|&id| {
+        doc.get_node(id).is_some_and(|n| {
+            n.data
+                .is_element_with_tag_name(&blitz_dom::local_name!("form"))
+        })
+    })
+}
+
 impl EventHandler for DioxusEventHandler<'_> {
     fn handle_event(
         &mut self,
@@ -428,19 +493,27 @@ impl EventHandler for DioxusEventHandler<'_> {
         event_state: &mut EventState,
     ) {
         let doc = &*mutr.doc;
-        let mut fire = |s: &mut Self, name: &'static str, data: Rc<dyn Any>, bubbles: bool| {
+        // Returns whether a handler prevented the default action.
+        let mut fire = |s: &mut Self,
+                        name: &'static str,
+                        data: Rc<dyn Any>,
+                        bubbles: bool,
+                        chain: &[usize]|
+         -> bool {
             if !s.vdom_state.has_listeners(name) {
-                return;
+                return false;
             }
             let Some(dx_event) = dispatch(s.vdom, doc, name, &data, bubbles, chain) else {
-                return;
+                return false;
             };
-            if !dx_event.default_action_enabled() {
+            let prevented = !dx_event.default_action_enabled();
+            if prevented {
                 event_state.prevent_default();
             }
             if !dx_event.propagates() {
                 event_state.stop_propagation();
             }
+            prevented
         };
 
         let name = event.name();
@@ -457,25 +530,40 @@ impl EventHandler for DioxusEventHandler<'_> {
                     _ => "pointerup",
                 };
                 let pointer = wrap_event_data(NativePointerData(data.clone()));
-                fire(self, pointer_name, pointer, true);
+                fire(self, pointer_name, pointer, true, chain);
                 // PATCH(rust-ui): a secondary-button press also fires `contextmenu`, after
                 // `mousedown` as browsers on Linux and macOS do. Blitz has no menu of its own.
                 let context_menu = matches!(&event.data, DomEventData::MouseDown(m) if m.button == MouseEventButton::Secondary);
-                fire(self, name, wrap_event_data(data.clone()), bubbles);
+                fire(self, name, wrap_event_data(data.clone()), bubbles, chain);
                 if context_menu {
-                    fire(self, "contextmenu", wrap_event_data(data), true);
+                    fire(self, "contextmenu", wrap_event_data(data), true, chain);
                 }
             }
             DomEventData::Click(m) => {
                 let data = Self::mouse_data(doc, event.target, m);
-                fire(self, name, wrap_event_data(data), bubbles);
+                let prevented = fire(self, name, wrap_event_data(data), bubbles, chain);
+                // PATCH(rust-ui): a click on a submit button fires `submit` on its form, as in
+                // browsers (Blitz only submits for `<input type=submit>`, and never tells
+                // scripts). A handler that prevents it also stops Blitz's own submission.
+                if !prevented {
+                    if let Some(form) = clicked_submit_form(doc, chain) {
+                        fire(self, "submit", empty_form_data(), true, &chain[form..]);
+                    }
+                }
             }
 
             DomEventData::KeyDown(kevent)
             | DomEventData::KeyUp(kevent)
             | DomEventData::KeyPress(kevent) => {
                 let data = wrap_event_data(BlitzKeyboardData(kevent.clone()));
-                fire(self, name, data, bubbles);
+                let prevented = fire(self, name, data, bubbles, chain);
+                // PATCH(rust-ui): Enter in a single-line field fires `submit` on its form.
+                let enter = matches!(&event.data, DomEventData::KeyDown(k) if k.key == keyboard_types::Key::Enter);
+                if enter && !prevented {
+                    if let Some(form) = implicit_submit_form(doc, chain) {
+                        fire(self, "submit", empty_form_data(), true, &chain[form..]);
+                    }
+                }
             }
 
             DomEventData::Input(data) => {
@@ -483,18 +571,19 @@ impl EventHandler for DioxusEventHandler<'_> {
                     value: data.value.clone(),
                     values: vec![],
                 });
-                fire(self, name, data.clone(), bubbles);
+                fire(self, name, data.clone(), bubbles, chain);
                 // PATCH(rust-ui): checkboxes and radios also fire `change` when clicked, as in
                 // browsers (Blitz only sends `input`).
                 let checkable = doc.get_node(event.target).is_some_and(|n| {
-                    n.data.is_element_with_tag_name(&blitz_dom::local_name!("input"))
+                    n.data
+                        .is_element_with_tag_name(&blitz_dom::local_name!("input"))
                         && matches!(
                             n.attr(blitz_dom::local_name!("type")),
                             Some("checkbox" | "radio")
                         )
                 });
                 if checkable {
-                    fire(self, "change", data, true);
+                    fire(self, "change", data, true, chain);
                 }
             }
 
