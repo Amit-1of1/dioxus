@@ -62,8 +62,9 @@ impl HtmlEventConverter for NativeConverter {
         unimplemented!("todo: convert_drag_data in dioxus-native. requires support in blitz")
     }
 
-    fn convert_image_data(&self, _event: &PlatformEventData) -> ImageData {
-        unimplemented!("todo: convert_image_data in dioxus-native. requires support in blitz")
+    // PATCH(rust-ui): `onload` on images (upstream: `unimplemented!`).
+    fn convert_image_data(&self, event: &PlatformEventData) -> ImageData {
+        ImageData::new(event.downcast::<NativeImageData>().unwrap().clone())
     }
 
     fn convert_media_data(&self, _event: &PlatformEventData) -> MediaData {
@@ -327,6 +328,22 @@ impl HasPointerData for NativePointerData {
 }
 
 impl HasMouseData for NativePointerData {
+    fn as_any(&self) -> &dyn std::any::Any {
+        self as &dyn std::any::Any
+    }
+}
+
+/// PATCH(rust-ui): data for an image `load` (or `error`) event.
+#[derive(Clone, Debug)]
+pub(crate) struct NativeImageData {
+    pub(crate) error: bool,
+}
+
+impl dioxus_html::HasImageData for NativeImageData {
+    fn load_error(&self) -> bool {
+        self.error
+    }
+
     fn as_any(&self) -> &dyn std::any::Any {
         self as &dyn std::any::Any
     }

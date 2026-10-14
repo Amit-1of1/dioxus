@@ -1,7 +1,7 @@
 //! Integration between Dioxus and Blitz
 use crate::events::{
     BlitzKeyboardData, NativeClickData, NativeConverter, NativeFocusData, NativeFormData,
-    NativeMountedData, NativePointerData,
+    NativeImageData, NativeMountedData, NativePointerData,
 };
 use crate::mounted::RequestQueue;
 use crate::mutation_writer::{DioxusState, MutationWriter};
@@ -10,7 +10,9 @@ use crate::NodeId;
 use blitz_dom::{
     Attribute, BaseDocument, Document, DocumentConfig, EventDriver, EventHandler, Node, DEFAULT_CSS,
 };
-use blitz_traits::events::{BlitzMouseButtonEvent, DomEvent, DomEventData, EventState, UiEvent};
+use blitz_traits::events::{
+    BlitzMouseButtonEvent, DomEvent, DomEventData, EventState, MouseEventButton, UiEvent,
+};
 use dioxus_core::{ElementId, Event, VirtualDom};
 use dioxus_html::{set_event_converter, PlatformEventData};
 use futures_util::task::noop_waker;
@@ -156,6 +158,24 @@ impl DioxusDocument {
     }
 
     /// PATCH(rust-ui): fire `onmounted` for elements created since the last call.
+    /// PATCH(rust-ui): fire `load` on images whose data arrived since the last poll.
+    fn fire_image_loads(&mut self) -> bool {
+        let loaded = self.inner.take_loaded_images();
+        if loaded.is_empty() || !self.vdom_state.has_listeners("load") {
+            return false;
+        }
+        for node_id in loaded {
+            let Some(id) = self.inner.get_node(node_id).and_then(get_dioxus_id) else {
+                continue;
+            };
+            let data = wrap_event_data(NativeImageData { error: false });
+            self.vdom
+                .runtime()
+                .handle_event("load", Event::new(data, false), id);
+        }
+        true
+    }
+
     fn fire_mounted(&mut self) {
         let queue = std::mem::take(&mut self.vdom_state.mounted_queue);
         for id in queue {
@@ -245,8 +265,9 @@ impl Document for DioxusDocument {
     }
 
     fn poll(&mut self, cx: Option<TaskContext>) -> bool {
-        // PATCH(rust-ui): answer element queries made since the last poll.
-        let answered = self.service_mounted_requests();
+        // PATCH(rust-ui): answer element queries made since the last poll, and report images
+        // that loaded.
+        let answered = self.service_mounted_requests() | self.fire_image_loads();
         let ready = {
             let fut = self.vdom.wait_for_work();
             pin_mut!(fut);
@@ -437,7 +458,13 @@ impl EventHandler for DioxusEventHandler<'_> {
                 };
                 let pointer = wrap_event_data(NativePointerData(data.clone()));
                 fire(self, pointer_name, pointer, true);
-                fire(self, name, wrap_event_data(data), bubbles);
+                // PATCH(rust-ui): a secondary-button press also fires `contextmenu`, after
+                // `mousedown` as browsers on Linux and macOS do. Blitz has no menu of its own.
+                let context_menu = matches!(&event.data, DomEventData::MouseDown(m) if m.button == MouseEventButton::Secondary);
+                fire(self, name, wrap_event_data(data.clone()), bubbles);
+                if context_menu {
+                    fire(self, "contextmenu", wrap_event_data(data), true);
+                }
             }
             DomEventData::Click(m) => {
                 let data = Self::mouse_data(doc, event.target, m);
