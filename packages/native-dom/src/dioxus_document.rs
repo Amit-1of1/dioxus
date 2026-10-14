@@ -483,7 +483,19 @@ impl EventHandler for DioxusEventHandler<'_> {
                     value: data.value.clone(),
                     values: vec![],
                 });
-                fire(self, name, data, bubbles);
+                fire(self, name, data.clone(), bubbles);
+                // PATCH(rust-ui): checkboxes and radios also fire `change` when clicked, as in
+                // browsers (Blitz only sends `input`).
+                let checkable = doc.get_node(event.target).is_some_and(|n| {
+                    n.data.is_element_with_tag_name(&blitz_dom::local_name!("input"))
+                        && matches!(
+                            n.attr(blitz_dom::local_name!("type")),
+                            Some("checkbox" | "radio")
+                        )
+                });
+                if checkable {
+                    fire(self, "change", data, true);
+                }
             }
 
             // TODO: Implement IME handling
