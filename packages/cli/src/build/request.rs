@@ -2893,9 +2893,23 @@ impl BuildRequest {
             })
             .collect();
 
+        // PATCH(rust-ui): skip the crate itself and dev-dependency edges. A crate that
+        // dev-depends on itself (`foo = { path = ".", features = [...] }`, a common way to turn
+        // on features for its own tests) otherwise lists itself as a dependent, and every
+        // hot-patch of it fails with "Cycle in workspace dependency graph". Dev-dependencies
+        // are never part of the binary being patched either.
+        let graph = krates.graph();
         krates
             .direct_dependents(target_nid)
             .into_iter()
+            .filter(|dep| dep.node_id != target_nid)
+            .filter(|dep| {
+                !matches!(
+                    graph[dep.edge_id],
+                    krates::Edge::Dep { kind: krates::DepKind::Dev, .. }
+                        | krates::Edge::DepFeature { kind: krates::DepKind::Dev, .. }
+                )
+            })
             .filter_map(|dep| {
                 let name = dep.krate.name.replace('-', "_");
                 if workspace_names.contains(&name) {
