@@ -413,6 +413,20 @@ impl AppServer {
                     continue;
                 };
 
+                // PATCH(rust-ui): nothing changed since the last build. Editors and file
+                // watchers often report one save twice; the second event lands while a hot-patch
+                // is compiling, is queued, and runs once the patch is sent. `clear_cached_rsx`
+                // has emptied the template cache by then, so diffing the file against itself
+                // used to resend every template in it, built from the *new* code. The browser
+                // applies templates at once but loads the patch asynchronously, so for a moment
+                // the old code rendered new templates and panicked ("index out of bounds" in
+                // `render_with`) whenever the edit added a dynamic node. A file that matches
+                // what was last compiled, with no hot-reload edits pending, needs nothing.
+                if cached_file.most_recent.is_none() && cached_file.contents == new_contents {
+                    tracing::debug!("File unchanged since the last build: {:?}", path);
+                    continue;
+                }
+
                 let Ok(local_path) = path.strip_prefix(self.workspace.workspace_root()) else {
                     tracing::debug!("Skipping file outside workspace dir: {:?}", path);
                     continue;
