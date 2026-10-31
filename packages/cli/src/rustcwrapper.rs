@@ -134,8 +134,18 @@ fn write_rustc_args(args_dir: &PathBuf, rustc_args: &RustcArgs) {
                 _ => "bin", // proc-macro, cdylib, etc. — treat as bin
             };
 
+            // PATCH(rust-ui): key library targets by *package* name. Everything that reads
+            // these files back (the fat-build fingerprint check, the hot-patch cascade and the
+            // replay) names workspace crates by package, so a package whose `[lib] name`
+            // differs (package `atoll-ui`, lib `ui`) was never found: every fat build
+            // recompiled it and every hot-patch silently left its changes out.
+            let key = match (suffix, std::env::var("CARGO_PKG_NAME")) {
+                ("lib", Ok(pkg)) => pkg.replace('-', "_"),
+                _ => crate_name.clone(),
+            };
+
             std::fs::write(
-                args_dir.join(format!("{crate_name}.{suffix}.json")),
+                args_dir.join(format!("{key}.{suffix}.json")),
                 &serialized_args,
             )
             .expect("Failed to write rustc args to file");

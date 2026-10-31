@@ -1290,6 +1290,16 @@ impl BuildRequest {
                 })
         });
 
+        // PATCH(rust-ui): the rlib is named after the lib target (`--crate-name`), which can
+        // differ from the package name the caller passes in (package `atoll-ui`, lib `ui`).
+        let crate_name = rustc_args
+            .args
+            .iter()
+            .skip_while(|arg| *arg != "--crate-name")
+            .nth(1)
+            .map(String::as_str)
+            .unwrap_or(crate_name);
+
         // If we have an exact extra-filename, construct the precise rlib path.
         if let Some(extra) = &extra_filename {
             let exact = out_dir.join(format!("lib{crate_name}{extra}.rlib"));
