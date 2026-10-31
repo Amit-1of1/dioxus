@@ -741,7 +741,11 @@ pub fn create_wasm_jump_table(patch: &Path, cache: &HotpatchModuleCache) -> Resu
     // The ifunc_count will be passed to the dynamic loader so it can allocate the right amount of space
     // in the indirect function table when loading the patch.
     let name_to_ifunc_new = collect_func_ifuncs(&new);
-    let ifunc_count = name_to_ifunc_new.len() as u64;
+    // PATCH(rust-ui): reserve a table slot for every element-segment entry, not one per distinct
+    // function name. Entries without a name, or sharing one, still occupy a slot, so counting
+    // names under-allocates: a patch that pulled in a whole workspace crate (9436 entries) failed
+    // in the browser with "WebAssembly.instantiate(): table index is out of bounds".
+    let ifunc_count = (name_to_ifunc_new.len() as u64).max(ifunc_table_slots(&new));
     let mut map = AddressMap::default();
     for (name, idx) in name_to_ifunc_new.iter() {
         // Find the corresponding ifunc in the old module by name
@@ -799,6 +803,28 @@ fn convert_func_to_ifunc_call(
     }));
 
     new.funcs.get_mut(func_id).kind = FunctionKind::Local(builder.local_func(locals));
+}
+
+/// How many indirect-function-table slots the patch's active element segments write, counted
+/// from the patch's table base (segments placed by a global, i.e. `__table_base`, start at 0).
+fn ifunc_table_slots(m: &Module) -> u64 {
+    let mut slots = 0u64;
+    for el in m.elements.iter() {
+        let ElementKind::Active { offset, .. } = &el.kind else {
+            continue;
+        };
+        let start = match offset {
+            ConstExpr::Value(walrus::ir::Value::I32(idx)) => *idx as u64,
+            ConstExpr::Value(walrus::ir::Value::I64(idx)) => *idx as u64,
+            _ => 0,
+        };
+        let len = match &el.items {
+            ElementItems::Functions(ids) => ids.len(),
+            ElementItems::Expressions(_, exprs) => exprs.len(),
+        } as u64;
+        slots = slots.max(start + len);
+    }
+    slots
 }
 
 fn collect_func_ifuncs(m: &Module) -> HashMap<&str, i32> {
