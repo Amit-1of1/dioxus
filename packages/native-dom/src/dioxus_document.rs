@@ -555,7 +555,11 @@ impl EventHandler for DioxusEventHandler<'_> {
             DomEventData::KeyDown(kevent)
             | DomEventData::KeyUp(kevent)
             | DomEventData::KeyPress(kevent) => {
-                let data = wrap_event_data(BlitzKeyboardData(kevent.clone()));
+                // PATCH(rust-ui): keys pressed while an IME composes report `isComposing`, as
+                // in browsers, so handlers (Enter to send) can leave them to the IME.
+                let mut kevent = kevent.clone();
+                kevent.is_composing |= self.vdom_state.ime_composing;
+                let data = wrap_event_data(BlitzKeyboardData(kevent));
                 let prevented = fire(self, name, data, bubbles, chain);
                 // PATCH(rust-ui): Enter in a single-line field fires `submit` on its form.
                 let enter = matches!(&event.data, DomEventData::KeyDown(k) if k.key == keyboard_types::Key::Enter);
