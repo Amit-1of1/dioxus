@@ -54,8 +54,9 @@ impl HtmlEventConverter for NativeConverter {
         unimplemented!("todo: convert_clipboard_data in dioxus-native. requires support in blitz")
     }
 
-    fn convert_composition_data(&self, _event: &PlatformEventData) -> CompositionData {
-        unimplemented!("todo: convert_composition_data in dioxus-native. requires support in blitz")
+    // PATCH(rust-ui): composition events from the IME (upstream: `unimplemented!`).
+    fn convert_composition_data(&self, event: &PlatformEventData) -> CompositionData {
+        CompositionData::new(event.downcast::<NativeCompositionData>().unwrap().clone())
     }
 
     fn convert_drag_data(&self, _event: &PlatformEventData) -> DragData {
@@ -346,5 +347,21 @@ impl dioxus_html::HasImageData for NativeImageData {
 
     fn as_any(&self) -> &dyn std::any::Any {
         self as &dyn std::any::Any
+    }
+}
+
+/// PATCH(rust-ui): data of `compositionstart` / `compositionupdate` / `compositionend`.
+#[derive(Clone, Debug)]
+pub struct NativeCompositionData {
+    pub data: String,
+}
+
+impl dioxus_html::HasCompositionData for NativeCompositionData {
+    fn data(&self) -> String {
+        self.data.clone()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self as &dyn Any
     }
 }

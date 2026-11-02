@@ -22,6 +22,9 @@ pub struct DioxusState {
     pub(crate) mounted_queue: Vec<ElementId>,
     /// PATCH(rust-ui): the hovered element and its ancestors, innermost first
     pub(crate) hover_chain: Vec<NodeId>,
+    /// PATCH(rust-ui): whether an IME composition is in progress (between `compositionstart`
+    /// and `compositionend`)
+    pub(crate) ime_composing: bool,
 }
 
 impl DioxusState {
@@ -34,6 +37,7 @@ impl DioxusState {
             listener_counts: FxHashMap::default(),
             mounted_queue: Vec::new(),
             hover_chain: Vec::new(),
+            ime_composing: false,
         }
     }
 

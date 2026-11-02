@@ -1,7 +1,7 @@
 //! Integration between Dioxus and Blitz
 use crate::events::{
-    BlitzKeyboardData, NativeClickData, NativeConverter, NativeFocusData, NativeFormData,
-    NativeImageData, NativeMountedData, NativePointerData,
+    BlitzKeyboardData, NativeClickData, NativeCompositionData, NativeConverter, NativeFocusData,
+    NativeFormData, NativeImageData, NativeMountedData, NativePointerData,
 };
 use crate::mounted::RequestQueue;
 use crate::mutation_writer::{DioxusState, MutationWriter};
@@ -587,8 +587,43 @@ impl EventHandler for DioxusEventHandler<'_> {
                 }
             }
 
-            // TODO: Implement IME handling
-            DomEventData::Ime(_) => {}
+            // PATCH(rust-ui): IME input fires the composition events, as in browsers:
+            // `compositionstart` before the first preedit text, `compositionupdate` with each
+            // preedit, and `compositionend` with the committed text (or "" when the platform
+            // cancels). Blitz's default action then edits the field and fires `input`.
+            DomEventData::Ime(ime) => {
+                use blitz_traits::events::BlitzImeEvent;
+                let data = |text: &str| {
+                    wrap_event_data(NativeCompositionData {
+                        data: text.to_string(),
+                    })
+                };
+                match ime {
+                    BlitzImeEvent::Enabled => {}
+                    BlitzImeEvent::Preedit(text, _) if !text.is_empty() => {
+                        if !self.vdom_state.ime_composing {
+                            self.vdom_state.ime_composing = true;
+                            fire(self, "compositionstart", data(""), true, chain);
+                        }
+                        fire(self, "compositionupdate", data(text), true, chain);
+                    }
+                    // An empty preedit comes right before a commit, or alone when the user
+                    // deletes the whole preedit; the commit (or the next preedit) settles it.
+                    BlitzImeEvent::Preedit(..) => {}
+                    BlitzImeEvent::Commit(text) => {
+                        if !self.vdom_state.ime_composing {
+                            fire(self, "compositionstart", data(""), true, chain);
+                        }
+                        self.vdom_state.ime_composing = false;
+                        fire(self, "compositionend", data(text), true, chain);
+                    }
+                    BlitzImeEvent::Disabled => {
+                        if std::mem::take(&mut self.vdom_state.ime_composing) {
+                            fire(self, "compositionend", data(""), true, chain);
+                        }
+                    }
+                }
+            }
         }
     }
 }
